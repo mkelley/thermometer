@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+import os
+import sys
+import time
+import datetime
+import signal
+import requests
+from w1thermsensor import NoSensorFoundError, W1ThermSensor
+
+
+pid_file = '/home/msk/thermometer/pid.thermometerd'
+log_path = '/home/msk/thermometer'
+url = ''
+sensor_ids = {
+    'ambient0': "021564e8b8ff",
+    'waterproof0': "0000075d075a"
+}
+
+def create_pid_file(pid_file, pid):
+    with open(pid_file, 'w') as outf:
+        outf.write(str(pid))
+
+def destroy_pid_file(pid_file):
+    if os.path.exists(pid_file):
+        os.unlink(pid_file)
+
+def load_sensors(sensor_ids):
+    # Ambient probe ID: 021564e8b8ff 
+    # Waterproof probe ID: 0000075d075a
+    DS18B20 = W1ThermSensor.THERM_SENSOR_DS18B20
+
+    sensors = {}
+    for name, ID in sensor_ids.items():
+        try:
+            sensors[name] = W1ThermSensor(DS18B20, ID)
+        except NoSensorFoundError:
+            pass
+
+    if len(sensors) == 0:
+        raise NoSensorFoundError
+
+    print("Found sensors: {}".format(', '.join(sensors.keys())))
+    return sensors
+
+def loop(sensors, log, pid_file, sleep=300):
+    F = W1ThermSensor.DEGREES_F
+
+    while True:
+        row = [str(int(time.time() * 1000))]  # Javascript will use ms
+        for k in sorted(sensors.keys()):
+            row.append('{:.2f}'.format(sensors[k].get_temperature(F)))
+            params = {k: row[-1]}
+#            requests.get(url + k, params=params)
+
+        log.write(' '.join(row) + '\n')
+        log.flush()
+
+        time.sleep(sleep)
+        if not os.path.exists(pid_file):
+            break
+
+if os.path.exists(pid_file):
+    with open(pid_file, 'r') as inf:
+        pid = inf.read(-1)
+
+    print("{} is running under PID {}.  Shutting down and restarting.".format(
+            sys.argv[0], pid))
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        destroy_pid_file(pid_file)
+        sys.exit()
+    except OSError:
+        print("Hmmm, no such process.  Restarting {}.".format(sys.argv[0]))
+
+now = datetime.datetime.now().isoformat()
+sfx = now.replace('-', '').replace(':', '')[:13]
+pid = os.fork()
+if pid == 0:
+    while True:
+        try:
+            sensors = load_sensors(sensor_ids)
+            break
+        except NoSensorFoundError:
+            time.sleep(60)
+        except:
+            raise
+
+    with open('{}/thermometer-{}.log'.format(log_path, sfx), 'w') as log:
+        print("Saving temperatures to: {}".format(log.name))
+#        print("Sending temperatures to: {}".format(url))
+
+        # column order is alphabetical
+        log.write('# {}\n\n# timestamp'.format(now))
+        for name in sorted(sensors.keys()):
+            log.write(' {}'.format(name))
+        log.write('\n')
+
+        try:
+            loop(sensors, log, pid_file)
+        except:
+            raise
+        finally:
+            destroy_pid_file(pid_file)
+else:
+    create_pid_file(pid_file, pid)
+    print("Daemonizing.  To terminate, run {} again or remove PID file.".format(sys.argv[0]))
